@@ -1,72 +1,160 @@
-extern crate plotters;
-use plotters::prelude::*;
-use linfa::prelude::*;
-use linfa::Dataset;
-use linfa_linear::{FittedLinearRegression, LinearRegression};
-use ndarray::{array, Array2, ArrayView1, ArrayView2};
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use ndarray::{Array2, Array1};
 
-pub fn fit_model(features: ArrayView2<f64>, target: ArrayView1<f64>) -> FittedLinearRegression<f64> {
-    let dataset = Dataset::new(features.to_owned(), target.to_owned()); // Create dataset
+pub fn one_hot_encode(
+    input_path: &str,
+    output_path: &str,
+    reference_group: &str,
+    target_columns: &[&str], 
+) -> Result<(), Box<dyn Error>> {
+    let file = File::open(input_path)?;
+    let reader = BufReader::new(file);
 
-    let lin_reg = LinearRegression::new();
-    let model = lin_reg.fit(&dataset).unwrap(); // Fit the model
+    let mut lines = reader.lines();
+    let header = lines.next().ok_or("Missing header line")??;
+    let columns: Vec<&str> = header.split(',').collect();
 
-    let predictions = model.predict(&dataset);
-    let loss = (dataset.targets() - predictions)
-        .mapv(|x| x.abs())
-        .mean();
-
-    println!("Mean Absolute Error: {:?}", loss);
-    model
-}
-
-
-pub fn plot_data(
-    features: ArrayView2<f64>,
-    target: ArrayView2<f64>,
-    model: &FittedLinearRegression<f64>,
-) {
-    let x_values = features.column(0).to_vec(); 
-    let y_values = target.column(0).to_vec();  
-
-    let x_range: Vec<f64> = (x_values[0] as i32..=x_values[x_values.len() - 1] as i32)
-        .map(|x| x as f64)
-        .collect();
-    let y_predictions: Vec<f64> = x_range
+    let target_indices: HashMap<&str, usize> = target_columns
         .iter()
-        .map(|&x| {
-            let input = Array2::from_shape_vec((1, 1), vec![x]).unwrap();
-            model.predict(&input)[0]
+        .filter_map(|&col| {
+            columns
+                .iter()
+                .position(|&header_col| header_col == col)
+                .map(|index| (col, index))
         })
         .collect();
 
-    let root = BitMapBackend::new("linear_regression.png", (640, 480))
-        .into_drawing_area();
-    root.fill(&WHITE).unwrap();
+    if target_indices.is_empty() {
+        return Err("No target columns found in the dataset header".into());
+    }
 
-    let mut chart = ChartBuilder::on(&root)
-        .caption("Linear Regression", ("Arial", 20).into_font())
-        .x_label_area_size(40)
-        .y_label_area_size(40)
-        .build_cartesian_2d(0f64..x_values.last().unwrap() + 1.0, 0f64..y_values.iter().cloned().fold(0.0, f64::max) + 1.0)
-        .unwrap();
+    let mut unique_values: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut data = Vec::new();
 
-    chart.configure_mesh().draw().unwrap();
+    for line in lines {
+        let line = line?;
+        let row: Vec<String> = line.split(',').map(|s| s.to_string()).collect();
+        data.push(row.clone());
+
+        for (&col, &index) in &target_indices {
+            if let Some(value) = row.get(index) {
+                let unique_list = unique_values.entry(col).or_insert_with(Vec::new);
+                if !unique_list.contains(value) && value != reference_group {
+                    unique_list.push(value.clone());
+                }
+            }
+        }
+    }
+
+    let mut output_file = File::create(output_path)?;
+
+    let mut new_header: Vec<String> = Vec::new();
+    for &col in target_columns {
+        new_header.push(col.to_string()); 
+        if let Some(unique_list) = unique_values.get(col) {
+            for value in unique_list {
+                let new_column_name = format!("{}_is_{}", col, value);
+                new_header.push(new_column_name);
+            }
+        }
+    }
+
+    output_file.write_all(new_header.join(",").as_bytes())?;
+    output_file.write_all(b"\n")?;
+
+    for row in data {
+        let mut new_row = Vec::new();
+
+        for &col in target_columns {
+            if let Some(&index) = target_indices.get(col) {
+                if let Some(value) = row.get(index) {
+                    new_row.push(value.clone());
+                } else {
+                    new_row.push("".to_string());
+                }
+            }
+        }
+
+        for &col in target_columns {
+            if let Some(unique_list) = unique_values.get(col) {
+                if let Some(&index) = target_indices.get(col) {
+                    for value in unique_list {
+                        let is_match = if let Some(row_value) = row.get(index) {
+                            row_value == value
+                        } else {
+                            false
+                        };
+                        new_row.push(if is_match { "1" } else { "0" }.to_string());
+                    }
+                }
+            }
+        }
+
+        output_file.write_all(new_row.join(",").as_bytes())?;
+        output_file.write_all(b"\n")?;
+    }
+
+    Ok(())
+}
 
 
-    chart
-        .draw_series(
-            x_values
-                .iter()
-                .zip(y_values.iter())
-                .map(|(&x, &y)| Circle::new((x, y), 5, RED.filled())),
-        )
-        .unwrap();
+pub fn matrix(
+    input_path: &str,
+    reference_group: &str,
+    target_column: &str, 
+) -> Result<(Array2<f64>, Array1<f64>), Box<dyn Error>> {
+    let file = File::open(input_path)?;
+    let reader = BufReader::new(file);
 
-    chart
-        .draw_series(LineSeries::new(
-            x_range.into_iter().zip(y_predictions.into_iter()),
-            &BLUE,
-        ))
-        .unwrap();
+    let mut lines = reader.lines();
+    let header = lines.next().ok_or("Missing header line")??;
+    let columns: Vec<&str> = header.split(',').collect();
+
+    let target_index = columns
+        .iter()
+        .position(|&col| col == target_column)
+        .ok_or("Target column not found in the header")?;
+
+    let mut unique_values: Vec<String> = Vec::new();
+    let mut rows = Vec::new();
+
+    for line in lines {
+        let line = line?;
+        let row: Vec<String> = line.split(',').map(|s| s.to_string()).collect();
+        if let Some(value) = row.get(target_index) {
+            if !unique_values.contains(value) {
+                unique_values.push(value.clone());
+            }
+        }
+        rows.push(row);
+    }
+
+    unique_values.retain(|val| val != reference_group);
+
+    let num_rows = rows.len();
+    let num_predictors = unique_values.len();
+    let mut x_data = Vec::new();
+    let mut y_data = Vec::new();
+
+    for row in rows {
+        if let Some(value) = row.get(target_index) {
+            y_data.push(if value == reference_group { 1.0 } else { 0.0 });
+        }
+
+        let mut predictors = Vec::new();
+        for unique_value in &unique_values {
+            if let Some(value) = row.get(target_index) {
+                predictors.push(if value == unique_value { 1.0 } else { 0.0 });
+            }
+        }
+        x_data.extend(predictors);
+    }
+
+    let x_matrix = Array2::from_shape_vec((num_rows, num_predictors), x_data)?;
+    let y_vector = Array1::from_vec(y_data);
+
+    Ok((x_matrix, y_vector))
 }
