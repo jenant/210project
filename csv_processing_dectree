@@ -1,0 +1,46 @@
+use serde::Deserialize;
+use csv::ReaderBuilder;
+use ndarray::{Array2, Array1};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SerRecord {
+    subject_race: String,
+    subject_sex: String,
+    arrest_made: String,
+    search_conducted: String,
+    total_points: usize,
+    PPG: f64,
+}
+
+pub fn process_csv_file(file_path: &str) -> (Array2<f64>, Array1<usize>) {
+    let mut rdr = ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(file_path)
+        .unwrap();
+
+    let mut records: Vec<SerRecord> = Vec::new();
+    for result in rdr.deserialize() {
+        let record: SerRecord = result.expect("a CSV record");
+        records.push(record);
+    }
+
+    let mut features = Vec::new();
+    let mut target = Vec::new();
+
+    for record in records {
+        features.push(vec![
+            record.total_points as f64,
+            record.PPG,
+            if record.subject_sex == "Male" { 1.0 } else { 0.0 },
+        ]);
+
+        target.push(if record.arrest_made == "true" { 1 } else { 0 });
+    }
+
+    let feature_matrix = Array2::from_shape_vec((features.len(), 3), features.into_iter().flatten().collect())
+        .expect("Failed to create feature matrix");
+    let target_vector = Array1::from_vec(target);
+
+    (feature_matrix, target_vector)
+}
