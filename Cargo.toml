@@ -1,0 +1,13 @@
+[package]
+name = "project"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+csv = "1.1"
+ndarray = "0.15.6"
+plotters = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+statrs = "0.16.0"
+piechart = "1.0.0"
+
